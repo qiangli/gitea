@@ -2,10 +2,10 @@
 // in external Go applications. It wraps the internal initialization
 // and server lifecycle for use by the ycode agent harness.
 //
-// The full Gitea web UI (InitWebInstalled + NormalRoutes) is not yet
-// wired because the routers package has unresolved transitive deps.
-// Instead, the server provides a lightweight dashboard UI backed by
-// Gitea's REST API, plus a passthrough to the API itself.
+// Gitea runs in-process — no external gitea binary or subprocess needed.
+// The server is initialized programmatically using Gitea's Go libraries.
+// If initialization fails (missing deps, DB errors, etc.), the server
+// falls back to an error page instead of killing the host process.
 package embed
 
 import (
@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"sync/atomic"
 
+	giteaLog "code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/routers"
 )
@@ -43,6 +44,32 @@ type Server struct {
 	port    int
 	cancel  context.CancelFunc
 	healthy atomic.Bool
+}
+
+// fatalError is the sentinel panic value used when Gitea calls log.Fatal.
+type fatalError struct{ msg string }
+
+// initGiteaSafe calls InitWebInstalled with log.Fatal redirected to panic,
+// so the host process survives initialization failures.
+func initGiteaSafe(ctx context.Context) (err error) {
+	// Replace Gitea's os.Exit with panic so we can recover.
+	origExiter := giteaLog.OsExiter
+	giteaLog.OsExiter = func(code int) {
+		panic(fatalError{msg: fmt.Sprintf("gitea init fatal (exit code %d)", code)})
+	}
+	defer func() {
+		giteaLog.OsExiter = origExiter
+		if r := recover(); r != nil {
+			if fe, ok := r.(fatalError); ok {
+				err = fmt.Errorf("%s", fe.msg)
+			} else {
+				err = fmt.Errorf("gitea init panic: %v", r)
+			}
+		}
+	}()
+
+	routers.InitWebInstalled(ctx)
+	return nil
 }
 
 // NewServer initializes an in-process Gitea server.
@@ -87,11 +114,32 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		setting.AppName = cfg.AppName
 	}
 
-	// Initialize Gitea subsystems (DB, cache, git, i18n, auth, etc.).
-	routers.InitWebInstalled(ctx)
+	var handler http.Handler
 
-	// Build the full Gitea web router (web UI + REST API + packages).
-	handler := routers.NormalRoutes()
+	// Initialize Gitea subsystems safely — log.Fatal panics instead of os.Exit.
+	if err := initGiteaSafe(ctx); err != nil {
+		// Initialization failed — serve an error page instead of crashing.
+		errMsg := err.Error()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, `<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>%s — Unavailable</title>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:40px;max-width:600px;margin:0 auto}
+h1{color:#f85149;margin-bottom:16px}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;font-size:13px;color:#ff7b72}</style>
+</head><body><h1>Git Server Init Failed</h1>
+<p>The embedded Gitea server failed to initialize. The git server tools and MCP endpoint are unavailable.</p>
+<pre>%s</pre>
+<p style="color:#8b949e;margin-top:24px">Check the ycode logs for details. Common causes: missing git binary, database errors, or permission issues.</p>
+</body></html>`, setting.AppName, errMsg)
+		})
+		handler = mux
+	} else {
+		// Build the full Gitea web router (web UI + REST API + packages).
+		handler = routers.NormalRoutes()
+	}
 
 	return &Server{
 		handler: handler,
@@ -151,5 +199,3 @@ func (s *Server) Port() int {
 func (s *Server) Healthy() bool {
 	return s.healthy.Load()
 }
-
-
