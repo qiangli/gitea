@@ -1,8 +1,8 @@
 <nav id="navbar" aria-label="{{ctx.Locale.Tr "aria.navbar"}}">
 	<div class="navbar-left">
-		<!-- the logo -->
-		<a class="item" id="navbar-logo" href="{{AppSubUrl}}/" aria-label="{{if .IsSigned}}{{ctx.Locale.Tr "dashboard"}}{{else}}{{ctx.Locale.Tr "home_title"}}{{end}}">
-			<img width="30" height="30" src="{{AssetUrlPrefix}}/img/logo.svg" alt="{{ctx.Locale.Tr "logo"}}" aria-hidden="true">
+		<!-- the logo: ycode customization — links to proxy landing page outside /git/ -->
+		<a class="item" id="navbar-logo" href="/" aria-label="ycode home">
+			{{svg "octicon-home" 30}}
 		</a>
 
 		<!-- mobile right menu, it must be here because in mobile view, each item is a flex column, the first item is a full row column -->
@@ -35,9 +35,7 @@
 
 		{{template "custom/extra_links" .}}
 
-		{{if not .IsSigned}}
-			<a class="item" target="_blank" href="https://docs.gitea.com">{{ctx.Locale.Tr "help"}}</a>
-		{{end}}
+		{{/* ycode customization: external Help link removed */}}
 	</div>
 
 	<!-- the full dropdown menus -->
@@ -119,10 +117,7 @@
 						{{svg "octicon-tools"}}
 						{{ctx.Locale.Tr "your_settings"}}
 					</a>
-					<a class="item" target="_blank" href="https://docs.gitea.com">
-						{{svg "octicon-question"}}
-						{{ctx.Locale.Tr "help"}}
-					</a>
+					{{/* ycode customization: external Help link removed */}}
 					{{if .IsAdmin}}
 					<div class="divider"></div>
 					<a class="{{if .PageIsAdmin}}active {{end}}item" href="{{AppSubUrl}}/-/admin">
@@ -138,16 +133,7 @@
 				</div><!-- end content avatar menu -->
 			</div><!-- end dropdown avatar menu -->
 		{{else}}
-			{{if .ShowRegistrationButton}}
-				<a class="item{{if .PageIsSignUp}} active{{end}}" href="{{AppSubUrl}}/user/sign_up">
-					{{svg "octicon-person"}}
-					<span class="tw-ml-1">{{ctx.Locale.Tr "register"}}</span>
-				</a>
-			{{end}}
-			<a class="item{{if .PageIsSignIn}} active{{end}}" rel="nofollow" href="{{AppSubUrl}}/user/login">
-				{{svg "octicon-sign-in"}}
-				<span class="tw-ml-1">{{ctx.Locale.Tr "sign_in"}}</span>
-			</a>
+			{{/* ycode customization: Register / Sign-In navbar buttons hidden — Loom uses an admin API token, no human web login needed. The /user/login route stays reachable by direct URL. */}}
 		{{end}}
 	</div><!-- end full right menu -->
 
