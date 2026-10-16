@@ -22,6 +22,9 @@ def configuration(tool, binary, work, port, here):
     env = {k: v for k, v in os.environ.items()
            if k.upper() in {"SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "COMSPEC"}}
     env["HOME"] = str(work)
+    # Windows home lookup uses USERPROFILE, including Gitea's SSH settings
+    # initialization even with DISABLE_SSH=true. Keep it in the temp sandbox.
+    env["USERPROFILE"] = str(work)
     for name in ("no-tracking.env", "otel.env"):
         for line in (here / name).read_text().splitlines():
             if line and not line.startswith("#") and "=" in line:
@@ -60,6 +63,14 @@ def configuration(tool, binary, work, port, here):
         urls = [f"http://127.0.0.1:{port}/", f"http://127.0.0.1:{port}/bashy-probe/",
                 f"http://127.0.0.1:{port+1}/cluster/status",
                 f"http://127.0.0.1:{port+1}/dir/status", f"http://127.0.0.1:{port+3}/"]
+    elif tool in ("victoria-logs", "victoria-metrics", "victoria-traces"):
+        argv = [binary, f"--storageDataPath={data}",
+                f"--httpListenAddr=127.0.0.1:{port}"]
+        query = {"victoria-logs": "/select/logsql/query?query=%2A",
+                 "victoria-metrics": "/api/v1/query?query=up",
+                 "victoria-traces": "/select/jaeger/api/services"}[tool]
+        urls = [f"http://127.0.0.1:{port}{path}" for path in
+                ("/health", "/metrics", query)]
     else:
         raise ValueError(f"unsupported service: {tool}")
     return argv, env, urls
@@ -78,6 +89,7 @@ def request(url):
 def exercise(tool, binary, work, port, here):
     argv, env, urls = configuration(tool, binary, work, port, here)
     log = work / "service.log"
+    completed = False
     with log.open("w", encoding="utf-8") as output:
         proc = subprocess.Popen(argv, cwd=work, env=env, stdout=output, stderr=output)
         try:
@@ -98,19 +110,46 @@ def exercise(tool, binary, work, port, here):
             for phase in range(2):
                 for url in urls:
                     print(f"probe {url}: {request(url)}", flush=True)
+                if tool.startswith("victoria-"):
+                    path, body, content_type = {
+                        "victoria-logs": ("/insert/jsonline?_stream_fields=level",
+                            b'{"_msg":"bashy no-egress probe","level":"info"}',
+                            "application/stream+json"),
+                        "victoria-metrics": ("/api/v1/import/prometheus",
+                            b"bashy_probe 1\n", "text/plain"),
+                        "victoria-traces": ("/insert/opentelemetry/v1/traces",
+                            b"{}", "application/json"),
+                    }[tool]
+                    ingest = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                        data=body, headers={"Content-Type": content_type}, method="POST")
+                    print(f"ingest {path}: {request(ingest)}", flush=True)
                 if phase == 0:
                     time.sleep(30)
             if proc.poll() is not None:
                 raise RuntimeError("service exited during observation")
+            completed = True
         finally:
-            proc.terminate()
             try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-    # The Defender harness also rejects denial signatures in this output.
-    print(log.read_text(encoding="utf-8", errors="replace"), flush=True)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            finally:
+                # Emit diagnostics even on startup/probe/cleanup failure, before
+                # TemporaryDirectory removes them. Bound both memory and output.
+                output.flush()
+                with log.open("rb") as captured:
+                    captured.seek(0, os.SEEK_END)
+                    size = captured.tell()
+                    # Successful runs retain the full log for the Defender
+                    # denial-signature check; failed runs cannot pass anyway.
+                    captured.seek(0 if completed else max(0, size - 32768))
+                    tail = captured.read().decode("utf-8", errors="replace")
+                scope = "full log" if completed else "last 32768 bytes"
+                print(f"service stdout/stderr ({scope}; total {size}):\n{tail}",
+                      flush=True)
 
 
 def main():
